@@ -67,6 +67,8 @@ class JailThread(Thread):
 		def run_with_except_hook(*args, **kwargs):
 			try:
 				run(*args, **kwargs)
+				# call on stop callback to do some finalizations:
+				self.onStop()
 			except Exception as e:
 				# avoid very sporadic error "'NoneType' object has no attribute 'exc_info'" (https://bugs.python.org/issue7336)
 				# only extremely fast systems are affected ATM (2.7 / 3.x), if thread ends nothing is available here.
@@ -97,6 +99,12 @@ class JailThread(Thread):
 		self.active = True
 		super(JailThread, self).start()
 
+	@abstractmethod
+	def onStop(self): # pragma: no cover - absract
+		"""Abstract - Called when thread ends (after run).
+		"""
+		pass
+
 	def stop(self):
 		"""Sets `active` property to False, to flag run method to return.
 		"""
@@ -120,3 +128,6 @@ class JailThread(Thread):
 ## python 2.x replace binding of private __bootstrap method:
 if sys.version_info < (3,): # pragma: 3.x no cover
 	JailThread._Thread__bootstrap = JailThread._JailThread__bootstrap
+## python 3.9, restore isAlive method:
+elif not hasattr(JailThread, 'isAlive'): # pragma: 2.x no cover
+	 JailThread.isAlive = JailThread.is_alive

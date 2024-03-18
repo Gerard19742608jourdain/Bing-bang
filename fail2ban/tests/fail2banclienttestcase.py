@@ -37,7 +37,7 @@ from threading import Thread
 
 from ..client import fail2banclient, fail2banserver, fail2bancmdline
 from ..client.fail2bancmdline import Fail2banCmdLine
-from ..client.fail2banclient import exec_command_line as _exec_client, VisualWait
+from ..client.fail2banclient import exec_command_line as _exec_client, CSocket, VisualWait
 from ..client.fail2banserver import Fail2banServer, exec_command_line as _exec_server
 from .. import protocol
 from ..server import server
@@ -230,7 +230,7 @@ def _start_params(tmp, use_stock=False, use_stock_cfg=None,
 			os.symlink(os.path.abspath(pjoin(STOCK_CONF_DIR, n)), pjoin(cfg, n))
 	if create_before_start:
 		for n in create_before_start:
-			_write_file(n % {'tmp': tmp}, 'w', '')
+			_write_file(n % {'tmp': tmp}, 'w')
 	# parameters (sock/pid and config, increase verbosity, set log, etc.):
 	vvv, llev = (), "INFO"
 	if unittest.F2B.log_level < logging.INFO: # pragma: no cover
@@ -343,6 +343,7 @@ def with_foreground_server_thread(startextra={}):
 				# to wait for end of server, default accept any exit code, because multi-threaded, 
 				# thus server can exit in-between...
 				def _stopAndWaitForServerEnd(code=(SUCCESS, FAILED)):
+					tearDownMyTime()
 					# if seems to be down - try to catch end phase (wait a bit for end:True to recognize down state):
 					if not phase.get('end', None) and not os.path.exists(pjoin(tmp, "f2b.pid")):
 						Utils.wait_for(lambda: phase.get('end', None) is not None, MID_WAITTIME)
@@ -452,6 +453,14 @@ class Fail2banClientServerBase(LogCaptureTestCase):
 		self.assertRaises(exitType, self.exec_command_line[0],
 			(self.exec_command_line[1:] + startparams + args))
 
+	def execCmdDirect(self, startparams, *args):
+		sock = startparams[startparams.index('-s')+1]
+		s = CSocket(sock)
+		try:
+			return s.send(args)
+		finally:
+			s.close()
+
 	#
 	# Common tests
 	#
@@ -469,18 +478,51 @@ class Fail2banClientServerBase(LogCaptureTestCase):
 
 	@with_foreground_server_thread(startextra={'f2b_local':(
 			"[Thread]",
-			"stacksize = 32"
+			"stacksize = 128"
 			"",
 		)})
 	def testStartForeground(self, tmp, startparams):
 		# check thread options were set:
 		self.pruneLog()
 		self.execCmd(SUCCESS, startparams, "get", "thread")
-		self.assertLogged("{'stacksize': 32}")
+		self.assertLogged("{'stacksize': 128}")
 		# several commands to server:
 		self.execCmd(SUCCESS, startparams, "ping")
 		self.execCmd(FAILED, startparams, "~~unknown~cmd~failed~~")
 		self.execCmd(SUCCESS, startparams, "echo", "TEST-ECHO")
+
+	@with_tmpdir
+	@with_kill_srv
+	def testStartFailsInForeground(self, tmp):
+		if not server.Fail2BanDb: # pragma: no cover
+			raise unittest.SkipTest('Skip test because no database')
+		dbname = pjoin(tmp,"tmp.db")
+		db = server.Fail2BanDb(dbname)
+		# set inappropriate DB version to simulate an irreparable error by start:
+		cur = db._db.cursor()
+		cur.executescript("UPDATE fail2banDb SET version = 555")
+		cur.close()
+		# timeout (thread will stop foreground server):
+		startparams = _start_params(tmp, db=dbname, logtarget='INHERITED')
+		phase = {'stop': True}
+		def _stopTimeout(startparams, phase):
+			if not Utils.wait_for(lambda: not phase['stop'], MAX_WAITTIME):
+				# print('==== STOP ====')
+				self.execCmdDirect(startparams, 'stop')
+		th = Thread(
+			name="_TestCaseWorker",
+			target=_stopTimeout,
+			args=(startparams, phase)
+		)		
+		th.start()
+		# test:
+		try:
+			self.execCmd(FAILED, ("-f",) + startparams, "start")
+		finally:
+			phase['stop'] = False
+			th.join()
+		self.assertLogged("Attempt to travel to future version of database", 
+			"Exit with code 255", all=True)
 
 
 class Fail2banClientTest(Fail2banClientServerBase):
@@ -591,6 +633,11 @@ class Fail2banClientTest(Fail2banClientServerBase):
 				os.kill(pid, signal.SIGCONT)
 			self.assertLogged("timed out")
 			self.pruneLog()
+			# check readline module available (expected by interactive client)
+			try:
+				import readline
+			except ImportError as e:
+				raise unittest.SkipTest('Skip test because of import error: %s' % e)
 			# interactive client chat with started server:
 			INTERACT += [
 				"echo INTERACT-ECHO",
@@ -644,12 +691,6 @@ class Fail2banClientTest(Fail2banClientServerBase):
 		self.execCmd(FAILED, (),
 			"--async", "-c", pjoin(tmp, "miss"), "start")
 		self.assertLogged("Base configuration directory " + pjoin(tmp, "miss") + " does not exist")
-		self.pruneLog()
-
-		## wrong socket
-		self.execCmd(FAILED, (),
-			"--async", "-c", pjoin(tmp, "config"), "-s", pjoin(tmp, "miss/f2b.sock"), "start")
-		self.assertLogged("There is no directory " + pjoin(tmp, "miss") + " to contain the socket file")
 		self.pruneLog()
 
 		## not running
@@ -745,12 +786,6 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.execCmd(FAILED, (),
 			"-c", pjoin(tmp, "miss"))
 		self.assertLogged("Base configuration directory " + pjoin(tmp, "miss") + " does not exist")
-		self.pruneLog()
-
-		## wrong socket
-		self.execCmd(FAILED, (),
-			"-c", pjoin(tmp, "config"), "-x", "-s", pjoin(tmp, "miss/f2b.sock"))
-		self.assertLogged("There is no directory " + pjoin(tmp, "miss") + " to contain the socket file")
 		self.pruneLog()
 
 		## already exists:
@@ -891,7 +926,7 @@ class Fail2banServerTest(Fail2banClientServerBase):
 				"action = ",
 				"         test-action2[name='%(__name__)s', restore='restored: <restored>', info=', err-code: <F-ERRCODE>']" \
 					if 2 in actions else "",
-				"         test-action2[name='%(__name__)s', actname=test-action3, _exec_once=1, restore='restored: <restored>']"
+				"         test-action2[name='%(__name__)s', actname=test-action3, _exec_once=1, restore='restored: <restored>',"
 										" actionflush=<_use_flush_>]" \
 					if 3 in actions else "",
 				"logpath = " + test2log,
@@ -940,10 +975,8 @@ class Fail2banServerTest(Fail2banClientServerBase):
 			"Jail 'broken-jail' skipped, because of wrong configuration", all=True)
 		
 		# enable both jails, 3 logs for jail1, etc...
-		# truncate test-log - we should not find unban/ban again by reload:
 		self.pruneLog("[test-phase 1b]")
 		_write_jail_cfg(actions=[1,2])
-		_write_file(test1log, "w+")
 		if unittest.F2B.log_level < logging.DEBUG: # pragma: no cover
 			_out_file(test1log)
 		self.execCmd(SUCCESS, startparams, "reload")
@@ -1004,9 +1037,9 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		# leave action2 just to test restored interpolation:
 		_write_jail_cfg(actions=[2,3])
 		
-		# write new failures:
 		self.pruneLog("[test-phase 2b]")
-		_write_file(test2log, "w+", *(
+		# write new failures:
+		_write_file(test2log, "a+", *(
 			(str(int(MyTime.time())) + "   error 403 from 192.0.2.2: test 2",) * 3 +
 		  (str(int(MyTime.time())) + "   error 403 from 192.0.2.3: test 2",) * 3 +
 		  (str(int(MyTime.time())) + " failure 401 from 192.0.2.4: test 2",) * 3 +
@@ -1018,13 +1051,19 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.assertLogged(
 			"2 ticket(s) in 'test-jail2",
 			"5 ticket(s) in 'test-jail1", all=True, wait=MID_WAITTIME)
+		# ban manually to cover restore in restart (phase 2c):
+		self.execCmd(SUCCESS, startparams,
+			"set", "test-jail2", "banip", "192.0.2.9")
+		self.assertLogged(
+			"3 ticket(s) in 'test-jail2", wait=MID_WAITTIME)
 		self.assertLogged(
 			"[test-jail1] Ban 192.0.2.2",
 			"[test-jail1] Ban 192.0.2.3",
 			"[test-jail1] Ban 192.0.2.4",
 			"[test-jail1] Ban 192.0.2.8",
 			"[test-jail2] Ban 192.0.2.4",
-			"[test-jail2] Ban 192.0.2.8", all=True)
+			"[test-jail2] Ban 192.0.2.8", 
+			"[test-jail2] Ban 192.0.2.9", all=True)
 		# test ips at all not visible for jail2:
 		self.assertNotLogged(
 			"[test-jail2] Found 192.0.2.2", 
@@ -1034,10 +1073,30 @@ class Fail2banServerTest(Fail2banClientServerBase):
 			all=True)
 		# if observer available wait for it becomes idle (write all tickets to db):
 		_observer_wait_idle()
-
-		# rotate logs:
-		_write_file(test1log, "w+")
-		_write_file(test2log, "w+")
+		# test banned command:
+		self.assertSortedEqual(self.execCmdDirect(startparams,
+			'banned'), (0, [
+				{'test-jail1': ['192.0.2.4', '192.0.2.1', '192.0.2.8', '192.0.2.3', '192.0.2.2']},
+				{'test-jail2': ['192.0.2.4', '192.0.2.9', '192.0.2.8']}
+			]
+		))
+		self.assertSortedEqual(self.execCmdDirect(startparams,
+			'banned', '192.0.2.1', '192.0.2.4', '192.0.2.222'), (0, [
+			  ['test-jail1'], ['test-jail1', 'test-jail2'], []
+			]
+		))
+		self.assertSortedEqual(self.execCmdDirect(startparams,
+			'get', 'test-jail1', 'banned')[1], [
+				'192.0.2.4', '192.0.2.1', '192.0.2.8', '192.0.2.3', '192.0.2.2'])
+		self.assertSortedEqual(self.execCmdDirect(startparams,
+			'get', 'test-jail2', 'banned')[1], [
+				'192.0.2.4', '192.0.2.9', '192.0.2.8'])
+		self.assertEqual(self.execCmdDirect(startparams,
+			'get', 'test-jail1', 'banned', '192.0.2.3')[1],  1)
+		self.assertEqual(self.execCmdDirect(startparams,
+			'get', 'test-jail1', 'banned', '192.0.2.9')[1],  0)
+		self.assertEqual(self.execCmdDirect(startparams,
+			'get', 'test-jail1', 'banned', '192.0.2.3', '192.0.2.9')[1],  [1, 0])
 
 		# restart jail without unban all:
 		self.pruneLog("[test-phase 2c]")
@@ -1046,15 +1105,17 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.assertLogged(
 			"Reload finished.",
 			"Restore Ban",
-			"2 ticket(s) in 'test-jail2", all=True, wait=MID_WAITTIME)
+			"3 ticket(s) in 'test-jail2", all=True, wait=MID_WAITTIME)
 		# stop/start and unban/restore ban:
 		self.assertLogged(
-			"Jail 'test-jail2' stopped",
-			"Jail 'test-jail2' started",
 			"[test-jail2] Unban 192.0.2.4",
 			"[test-jail2] Unban 192.0.2.8",
+			"[test-jail2] Unban 192.0.2.9",
+			"Jail 'test-jail2' stopped",
+			"Jail 'test-jail2' started",
 			"[test-jail2] Restore Ban 192.0.2.4",
-			"[test-jail2] Restore Ban 192.0.2.8", all=True
+			"[test-jail2] Restore Ban 192.0.2.8",
+			"[test-jail2] Restore Ban 192.0.2.9", all=True
 		)
 		# test restored is 1 (only test-action2):
 		self.assertLogged(
@@ -1099,7 +1160,8 @@ class Fail2banServerTest(Fail2banClientServerBase):
 			"Jail 'test-jail2' stopped",
 			"Jail 'test-jail2' started",
 			"[test-jail2] Unban 192.0.2.4",
-			"[test-jail2] Unban 192.0.2.8", all=True
+			"[test-jail2] Unban 192.0.2.8",
+			"[test-jail2] Unban 192.0.2.9", all=True
 		)
 		# test unban (action2):
 		self.assertLogged(
@@ -1153,7 +1215,7 @@ class Fail2banServerTest(Fail2banClientServerBase):
 
 		# now write failures again and check already banned (jail1 was alive the whole time) and new bans occurred (jail1 was alive the whole time):
 		self.pruneLog("[test-phase 5]")
-		_write_file(test1log, "w+", *(
+		_write_file(test1log, "a+", *(
 			(str(int(MyTime.time())) + " failure 401 from 192.0.2.1: test 5",) * 3 + 
 			(str(int(MyTime.time())) + "   error 403 from 192.0.2.5: test 5",) * 3 +
 			(str(int(MyTime.time())) + " failure 401 from 192.0.2.6: test 5",) * 3
@@ -1173,12 +1235,40 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.assertNotLogged("[test-jail1] Found 192.0.2.5")
 
 		# unban single ips:
-		self.pruneLog("[test-phase 6]")
+		self.pruneLog("[test-phase 6a]")
 		self.execCmd(SUCCESS, startparams,
 			"--async", "unban", "192.0.2.5", "192.0.2.6")
 		self.assertLogged(
 			"192.0.2.5 is not banned",
 			"[test-jail1] Unban 192.0.2.6", all=True, wait=MID_WAITTIME
+		)
+		# unban ips by subnet (cidr/mask):
+		self.pruneLog("[test-phase 6b]")
+		self.execCmd(SUCCESS, startparams,
+			"--async", "unban", "192.0.2.2/31")
+		self.assertLogged(
+			"[test-jail1] Unban 192.0.2.2",
+			"[test-jail1] Unban 192.0.2.3", all=True, wait=MID_WAITTIME
+		)		
+		self.execCmd(SUCCESS, startparams,
+			"--async", "unban", "192.0.2.8/31", "192.0.2.100/31")
+		self.assertLogged(
+			"[test-jail1] Unban 192.0.2.8",
+			"192.0.2.100/31 is not banned", all=True, wait=MID_WAITTIME)
+
+		# ban/unban subnet(s):
+		self.pruneLog("[test-phase 6c]")
+		self.execCmd(SUCCESS, startparams,
+			"--async", "set", "test-jail1", "banip", "192.0.2.96/28", "192.0.2.112/28")
+		self.assertLogged(
+			"[test-jail1] Ban 192.0.2.96/28",
+			"[test-jail1] Ban 192.0.2.112/28", all=True, wait=MID_WAITTIME
+		)
+		self.execCmd(SUCCESS, startparams,
+			"--async", "set", "test-jail1", "unbanip", "192.0.2.64/26"); # contains both subnets .96/28 and .112/28
+		self.assertLogged(
+			"[test-jail1] Unban 192.0.2.96/28",
+			"[test-jail1] Unban 192.0.2.112/28", all=True, wait=MID_WAITTIME
 		)
 
 		# reload all (one jail) with unban all:
@@ -1190,8 +1280,6 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.assertLogged(
 			"Jail 'test-jail1' reloaded",
 			"[test-jail1] Unban 192.0.2.1",
-			"[test-jail1] Unban 192.0.2.2",
-			"[test-jail1] Unban 192.0.2.3",
 			"[test-jail1] Unban 192.0.2.4", all=True
 		)
 		# no restart occurred, no more ban (unbanned all using option "--unban"):
@@ -1199,8 +1287,6 @@ class Fail2banServerTest(Fail2banClientServerBase):
 			"Jail 'test-jail1' stopped",
 			"Jail 'test-jail1' started",
 			"[test-jail1] Ban 192.0.2.1",
-			"[test-jail1] Ban 192.0.2.2",
-			"[test-jail1] Ban 192.0.2.3",
 			"[test-jail1] Ban 192.0.2.4", all=True
 		)
 
@@ -1272,7 +1358,7 @@ class Fail2banServerTest(Fail2banClientServerBase):
 			'backend = polling',
 			'usedns = no',
 			'logpath = %(tmp)s/blck-failures.log',
-			'action = nginx-block-map[blck_lst_reload="", blck_lst_file="%(tmp)s/blck-lst.map"]',
+			'action = nginx-block-map[srv_cmd="echo nginx", srv_pid="%(tmp)s/f2b.pid", blck_lst_file="%(tmp)s/blck-lst.map"]',
 			'         blocklist_de[actionban=\'curl() { echo "*** curl" "$*";}; <Definition/actionban>\', email="Fail2Ban <fail2ban@localhost>", '
 													  'apikey="TEST-API-KEY", agent="fail2ban-test-agent", service=<name>]',
 			'filter =',
@@ -1312,6 +1398,8 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.assertIn('\\125-000-004 1;\n', mp)
 		self.assertIn('\\125-000-005 1;\n', mp)
 
+		# check nginx reload is logged (pid of fail2ban is used to simulate success check nginx is running):
+		self.assertLogged("stdout: 'nginx -qt'", "stdout: 'nginx -s reload'", all=True)
 		# check blocklist_de substitution (e. g. new-line after <matches>):
 		self.assertLogged(
 			"stdout: '*** curl --fail --data-urlencode server=Fail2Ban <fail2ban@localhost>"
@@ -1354,8 +1442,9 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		'jails': (
 			# default:
 			'''test_action = dummy[actionstart_on_demand=1, init="start: %(__name__)s", target="%(tmp)s/test.txt",
-      actionban='<known/actionban>;
-        echo "<matches>"; printf "=====\\n%%b\\n=====\\n\\n" "<matches>" >> <target>']''',
+      actionban='<known/actionban>; echo "found: <jail.found> / <jail.found_total>, banned: <jail.banned> / <jail.banned_total>"
+        echo "<matches>"; printf "=====\\n%%b\\n=====\\n\\n" "<matches>" >> <target>',
+      actionstop='<known/actionstop>; echo "stats <name> - found: <jail.found_total>, banned: <jail.banned_total>"']''',
 			# jail sendmail-auth:
 			'[sendmail-auth]',
 			'backend = polling',
@@ -1400,7 +1489,8 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		_write_file(lgfn, "w+", *smaut_msg)
 		# wait and check it caused banned (and dump in the test-file):
 		self.assertLogged(
-			"[sendmail-auth] Ban 192.0.2.1", "1 ticket(s) in 'sendmail-auth'", all=True, wait=MID_WAITTIME)
+			"[sendmail-auth] Ban 192.0.2.1",  "stdout: 'found: 0 / 3, banned: 1 / 1'",
+			"1 ticket(s) in 'sendmail-auth'", all=True, wait=MID_WAITTIME)
 		_out_file(tofn)
 		td = _read_file(tofn)
 		# check matches (maxmatches = 2, so only 2 & 3 available):
@@ -1411,10 +1501,11 @@ class Fail2banServerTest(Fail2banClientServerBase):
 
 		self.pruneLog("[test-phase sendmail-reject]")
 		# write log:
-		_write_file(lgfn, "w+", *smrej_msg)
+		_write_file(lgfn, "a+", *smrej_msg)
 		# wait and check it caused banned (and dump in the test-file):
 		self.assertLogged(
-			"[sendmail-reject] Ban 192.0.2.2", "1 ticket(s) in 'sendmail-reject'", all=True, wait=MID_WAITTIME)
+			"[sendmail-reject] Ban 192.0.2.2", "stdout: 'found: 0 / 3, banned: 1 / 1'",
+			"1 ticket(s) in 'sendmail-reject'", all=True, wait=MID_WAITTIME)
 		_out_file(tofn)
 		td = _read_file(tofn)
 		# check matches (no maxmatches, so all matched messages are available):
@@ -1428,6 +1519,8 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		# wait a bit:
 		self.assertLogged(
 			"Reload finished.",
+			"stdout: 'stats sendmail-auth - found: 3, banned: 1'",
+			"stdout: 'stats sendmail-reject - found: 3, banned: 1'",
 			"[sendmail-auth] Restore Ban 192.0.2.1", "1 ticket(s) in 'sendmail-auth'", all=True, wait=MID_WAITTIME)
 		# check matches again - (dbmaxmatches = 1), so it should be only last match after restart:
 		td = _read_file(tofn)
@@ -1536,7 +1629,7 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		wakeObs = False
 		_observer_wait_before_incrban(lambda: wakeObs)
 		# write again (IP already bad):
-		_write_file(test1log, "w+", *(
+		_write_file(test1log, "a+", *(
 		  (str(int(MyTime.time())) + " failure 401 from 192.0.2.11: I'm very bad \"hacker\" `` $(echo test)",) * 2
 		))
 		# wait for ban:
@@ -1569,6 +1662,37 @@ class Fail2banServerTest(Fail2banClientServerBase):
 		self.execCmd(SUCCESS, startparams, "get", "test-jail1", "banip", "--with-time")
 		self.assertLogged(
 			"192.0.2.11", "+ 600 =", all=True, wait=MID_WAITTIME)
+
+		# test stop with busy observer:
+		self.pruneLog("[test-phase end) stop on busy observer]")
+		tearDownMyTime()
+		a = {'state': 0}
+		obsMain = Observers.Main
+		def _long_action():
+			logSys.info('++ observer enters busy state ...')
+			a['state'] = 1
+			Utils.wait_for(lambda: a['state'] == 2, MAX_WAITTIME)
+			obsMain.db_purge(); # does nothing (db is already None)
+			logSys.info('-- observer leaves busy state.')
+		obsMain.add('call', _long_action)
+		obsMain.add('call', lambda: None)
+		# wait observer enter busy state:
+		Utils.wait_for(lambda: a['state'] == 1, MAX_WAITTIME)
+		# overwrite default wait time (normally 5 seconds):
+		obsMain_stop = obsMain.stop
+		def _stop(wtime=(0.01 if unittest.F2B.fast else 0.1), forceQuit=True):
+			return obsMain_stop(wtime, forceQuit)
+		obsMain.stop = _stop
+		# stop server and wait for end:
+		self.stopAndWaitForServerEnd(SUCCESS)
+		# check observer and db state:
+		self.assertNotLogged('observer leaves busy state')
+		self.assertFalse(obsMain.idle)
+		self.assertEqual(obsMain._ObserverThread__db, None)
+		# server is exited without wait for observer, stop it now:
+		a['state'] = 2
+		self.assertLogged('observer leaves busy state', wait=True)
+		obsMain.join()
 
 	# test multiple start/stop of the server (threaded in foreground) --
 	if False: # pragma: no cover

@@ -121,9 +121,12 @@ class JailReader(ConfigReader):
 
 	def getOptions(self):
 
+		basedir = self.getBaseDir()
+
 		# Before interpolation (substitution) add static options always available as default:
 		self.merge_defaults({
-			"fail2ban_version": version
+			"fail2ban_version": version,
+			"fail2ban_confpath": basedir
 		})
 
 		try:
@@ -140,20 +143,18 @@ class JailReader(ConfigReader):
 			# Read filter
 			flt = self.__opts["filter"]
 			if flt:
-				filterName, filterOpt = extractOptions(flt)
-				if not filterName:
-					raise JailDefError("Invalid filter definition %r" % flt)
+				try:
+					filterName, filterOpt = extractOptions(flt)
+				except ValueError as e:
+					raise JailDefError("Invalid filter definition %r: %s" % (flt, e))
 				self.__filter = FilterReader(
 					filterName, self.__name, filterOpt, 
-					share_config=self.share_config, basedir=self.getBaseDir())
+					share_config=self.share_config, basedir=basedir)
 				ret = self.__filter.read()
 				if not ret:
 					raise JailDefError("Unable to read the filter %r" % filterName)
-				if not filterOpt.get('logtype'):
-					# overwrite default logtype backend-related (considering that the filter settings may be overwritten):
-					self.__filter.merge_defaults({
-						'logtype': ['file','journal'][int(self.__opts.get('backend', '').startswith("systemd"))]
-					})
+				# set backend-related options (logtype):
+				self.__filter.applyAutoOptions(self.__opts.get('backend', ''))
 				# merge options from filter as 'known/...' (all options unfiltered):
 				self.__filter.getOptions(self.__opts, all=True)
 				ConfigReader.merge_section(self, self.__name, self.__filter.getCombined(), 'known/')
@@ -177,10 +178,10 @@ class JailReader(ConfigReader):
 					if not act:			  # skip empty actions
 						continue
 					# join with previous line if needed (consider possible new-line):
-					actName, actOpt = extractOptions(act)
-					prevln = ''
-					if not actName:
-						raise JailDefError("Invalid action definition %r" % act)
+					try:
+						actName, actOpt = extractOptions(act)
+					except ValueError as e:
+						raise JailDefError("Invalid action definition %r: %s" % (act, e))
 					if actName.endswith(".py"):
 						self.__actions.append([
 							"set",
@@ -188,13 +189,13 @@ class JailReader(ConfigReader):
 							"addaction",
 							actOpt.pop("actname", os.path.splitext(actName)[0]),
 							os.path.join(
-								self.getBaseDir(), "action.d", actName),
+								basedir, "action.d", actName),
 							json.dumps(actOpt),
 							])
 					else:
 						action = ActionReader(
 							actName, self.__name, actOpt,
-							share_config=self.share_config, basedir=self.getBaseDir())
+							share_config=self.share_config, basedir=basedir)
 						ret = action.read()
 						if ret:
 							action.getOptions(self.__opts)

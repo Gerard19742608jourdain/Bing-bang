@@ -53,6 +53,14 @@ class FilterReader(DefinitionInitConfigReader):
 	def getFile(self):
 		return self.__file
 
+	def applyAutoOptions(self, backend):
+		# set init option to backend-related logtype, considering
+		# that the filter settings may be overwritten in its local:
+		if (not self._initOpts.get('logtype') and 
+		    not self.has_option('Definition', 'logtype', False)
+		  ):
+			self._initOpts['logtype'] = ['file','journal'][int(backend.startswith("systemd"))]
+
 	def convert(self):
 		stream = list()
 		opts = self.getCombined()
@@ -64,8 +72,9 @@ class FilterReader(DefinitionInitConfigReader):
 	def _fillStream(stream, opts, jailName):
 		prio0idx = 0
 		for opt, value in opts.iteritems():
+			# Do not send a command if the value is not set (empty).
+			if value is None: continue
 			if opt in ("failregex", "ignoreregex"):
-				if value is None: continue
 				multi = []
 				for regex in value.split('\n'):
 					# Do not send a command if the rule is empty.
@@ -83,8 +92,6 @@ class FilterReader(DefinitionInitConfigReader):
 			elif opt in ('datepattern'):
 				stream.append(["set", jailName, opt, value])
 			elif opt == 'journalmatch':
-				# Do not send a command if the match is empty.
-				if value is None: continue
 				for match in value.split("\n"):
 					if match == '': continue
 					stream.append(

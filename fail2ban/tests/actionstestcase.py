@@ -96,6 +96,8 @@ class ExecuteActions(LogCaptureTestCase):
 		self.assertLogged("stdout: %r" % 'ip flush', "stdout: %r" % 'ip stop')
 		self.assertEqual(self.__actions.status(),[("Currently banned", 0 ),
                ("Total banned", 0 ), ("Banned IP list", [] )])
+		self.assertEqual(self.__actions.status('short'),[("Currently banned", 0 ),
+               ("Total banned", 0 )])
 
 	def testAddActionPython(self):
 		self.__actions.add(
@@ -215,6 +217,9 @@ class ExecuteActions(LogCaptureTestCase):
 		# flush for inet6 is intentionally "broken" here - test no unhandled except and invariant check:
 		act['actionflush?family=inet6'] = act.actionflush + '; exit 1'
 		act.actionstart_on_demand = True
+		# force errors via check in ban/unban:
+		act.actionban = "<actioncheck> ; " + act.actionban
+		act.actionunban = "<actioncheck> ; " + act.actionunban
 		self.__actions.start()
 		self.assertNotLogged("stdout: %r" % 'ip start')
 
@@ -292,6 +297,9 @@ class ExecuteActions(LogCaptureTestCase):
 		act['actionflush?family=inet6'] = act.actionflush + '; exit 1'
 		act.actionstart_on_demand = True
 		act.actionrepair_on_unban = True
+		# force errors via check in ban/unban:
+		act.actionban = "<actioncheck> ; " + act.actionban
+		act.actionunban = "<actioncheck> ; " + act.actionunban
 		self.__actions.start()
 		self.assertNotLogged("stdout: %r" % 'ip start')
 

@@ -22,6 +22,10 @@
 2013-06-02 09:22:05 [19591] SMTP call from pc012-6201.spo.scu.edu.tw [163.14.21.161]:3767 I=[1.2.3.4]:25 dropped: too many nonmail commands (last was "RSET")
 # failJSON: { "time": "2013-06-02T09:22:06", "match": true , "host": "192.0.2.109" }
 2013-06-02 09:22:06 SMTP call from [192.0.2.109] dropped: too many syntax or protocol errors (last command was "AUTH LOGIN")
+# failJSON: { "time": "2013-06-02T09:22:07", "match": true , "host": "192.0.2.109", "desc": "unrecognized commands, gh-3497" }
+2013-06-02 09:22:07 SMTP call from [192.0.2.109] dropped: too many unrecognized commands (last was "\033%-12345X")
+# failJSON: { "time": "2013-06-02T09:22:08", "match": true , "host": "192.0.2.109", "desc": "additional suffix at end, gh-3497" }
+2013-06-02 09:22:08 SMTP call from xxx.example.com [192.0.2.109] dropped: too many syntax or protocol errors (last command was "\300\024?\234?\235?/?5\300\022?",  C=EHLO)
 # failJSON: { "time": "2013-06-02T15:06:18", "match": true , "host": "46.20.35.114" }
 2013-06-02 15:06:18 H=(VM-WIN2K3-1562) [46.20.35.114] sender verify fail for <usfh@technological-systems.com>: Unknown user
 # failJSON: { "time": "2013-06-07T02:02:09", "match": true , "host": "91.232.21.92" }
@@ -42,6 +46,9 @@
 
 # failJSON: { "time": "2014-01-12T02:07:48", "match": true , "host": "85.214.85.40" }
 2014-01-12 02:07:48 dovecot_login authenticator failed for h1832461.stratoserver.net (User) [85.214.85.40]: 535 Incorrect authentication data (set_id=scanner)
+
+# failJSON: { "time": "2019-10-22T03:39:17", "match": true , "host": "192.0.2.37", "desc": "pid-prefix in form of 'mx1 exim[...]:', gh-2553" }
+2019-10-22 03:39:17 mx1 exim[29786]: dovecot_login authenticator failed for (User) [192.0.2.37]: 535 Incorrect authentication data (set_id=test@domain.com)
 
 # failJSON: { "time": "2014-12-02T03:00:23", "match": true , "host": "193.254.202.35" }
 2014-12-02 03:00:23 auth_plain authenticator failed for (rom182) [193.254.202.35]:41556 I=[10.0.0.1]:25: 535 Incorrect authentication data (set_id=webmaster)

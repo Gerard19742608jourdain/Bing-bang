@@ -30,11 +30,7 @@ import sys
 from	 threading import Lock
 import time
 from ..helpers import getLogger, _merge_dicts, uni_decode
-
-try:
-	from collections import OrderedDict
-except ImportError: # pragma: 3.x no cover
-	OrderedDict = dict
+from collections import OrderedDict
 
 if sys.version_info >= (3, 3):
 	import importlib.machinery
@@ -100,30 +96,22 @@ class Utils():
 			with self.__lock:
 				# clean cache if max count reached:
 				if len(cache) >= self.maxCount:
-					if OrderedDict is not dict:
-						# ordered (so remove some from ahead, FIFO)
-						while cache:
-							(ck, cv) = cache.popitem(last=False)
-							# if not yet expired (but has free slot for new entry):
-							if cv[1] > t and len(cache) < self.maxCount:
-								break
-					else: # pragma: 3.x no cover (dict is in 2.6 only)
-						remlst = []
-						for (ck, cv) in cache.iteritems():
-							# if expired:
-							if cv[1] <= t:
-								remlst.append(ck)
-						for ck in remlst:
-							self._cache.pop(ck, None)
-						# if still max count - remove any one:
-						while cache and len(cache) >= self.maxCount:
-							cache.popitem()
+					# ordered (so remove some from ahead, FIFO)
+					while cache:
+						(ck, cv) = cache.popitem(last=False)
+						# if not yet expired (but has free slot for new entry):
+						if cv[1] > t and len(cache) < self.maxCount:
+							break
 				# set now:
 				cache[k] = (v, t + self.maxTime)
 
 		def unset(self, k):
 			with self.__lock:
 				self._cache.pop(k, None)
+
+		def clear(self):
+			with self.__lock:
+				self._cache.clear()
 
 
 	@staticmethod
@@ -260,7 +248,6 @@ class Utils():
 				if stdout is not None and stdout != '' and std_level >= logSys.getEffectiveLevel():
 					for l in stdout.splitlines():
 						logSys.log(std_level, "%x -- stdout: %r", realCmdId, uni_decode(l))
-				popen.stdout.close()
 			if popen.stderr:
 				try:
 					if retcode is None or retcode < 0:
@@ -271,7 +258,9 @@ class Utils():
 				if stderr is not None and stderr != '' and std_level >= logSys.getEffectiveLevel():
 					for l in stderr.splitlines():
 						logSys.log(std_level, "%x -- stderr: %r", realCmdId, uni_decode(l))
-				popen.stderr.close()
+
+		if popen.stdout: popen.stdout.close()
+		if popen.stderr: popen.stderr.close()
 
 		success = False
 		if retcode in success_codes:
@@ -327,11 +316,9 @@ class Utils():
 					timeout_expr = lambda: time.time() > time0
 				else:
 					timeout_expr = timeout
-				if not interval:
-					interval = Utils.DEFAULT_SLEEP_INTERVAL
 			if timeout_expr():
 				break
-			stm = min(stm + interval, Utils.DEFAULT_SLEEP_TIME)
+			stm = min(stm + (interval or Utils.DEFAULT_SLEEP_INTERVAL), Utils.DEFAULT_SLEEP_TIME)
 			time.sleep(stm)
 		return ret
 
